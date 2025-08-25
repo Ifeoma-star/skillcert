@@ -429,3 +429,286 @@
         )
     )
 )
+
+;; SkillCert Commit 3: Marketplace and Analytics System
+
+;; Marketplace for credential verification services
+(define-map verification-requests
+    uint
+    {
+        requester: principal,
+        credential-holder: principal,
+        credential-id: uint,
+        verification-fee: uint,
+        request-timestamp: uint,
+        completed: bool,
+        verified: bool,
+    }
+)
+
+(define-data-var verification-counter uint u0)
+
+;; Credential marketplace listings
+(define-map credential-listings
+    {
+        credential-id: uint,
+        holder: principal,
+    }
+    {
+        verification-price: uint,
+        available: bool,
+        listed-at: uint,
+    }
+)
+
+;; Analytics and reputation tracking
+(define-map issuer-analytics
+    principal
+    {
+        monthly-credentials: uint,
+        revocation-rate: uint,
+        average-validity-period: uint,
+        last-updated: uint,
+    }
+)
+
+;; Verification marketplace functions
+(define-public (request-credential-verification
+        (credential-holder principal)
+        (credential-id uint)
+        (verification-fee uint)
+    )
+    (let (
+            (verification-id (+ (var-get verification-counter) u1))
+            (credential (unwrap! (map-get? credentials credential-id)
+                err-credential-not-found
+            ))
+        )
+        (begin
+            (asserts! (not (var-get contract-paused)) err-invalid-parameter)
+            (asserts! (is-eq (get holder credential) credential-holder)
+                err-not-authorized
+            )
+            (asserts! (> verification-fee u0) err-invalid-parameter)
+            (asserts! (>= (stx-get-balance tx-sender) verification-fee)
+                err-insufficient-funds
+            )
+            ;; Transfer verification fee to credential holder
+            (unwrap! (stx-transfer? verification-fee tx-sender credential-holder)
+                err-insufficient-funds
+            )
+            (map-set verification-requests verification-id {
+                requester: tx-sender,
+                credential-holder: credential-holder,
+                credential-id: credential-id,
+                verification-fee: verification-fee,
+                request-timestamp: stacks-block-height,
+                completed: false,
+                verified: false,
+            })
+            (var-set verification-counter verification-id)
+            (ok verification-id)
+        )
+    )
+)
+
+(define-public (complete-verification-request
+        (verification-id uint)
+        (verification-result bool)
+    )
+    (let ((request (unwrap! (map-get? verification-requests verification-id)
+            err-not-authorized
+        )))
+        (begin
+            (asserts! (is-eq tx-sender (get credential-holder request))
+                err-not-authorized
+            )
+            (asserts! (not (get completed request)) err-invalid-parameter)
+            (map-set verification-requests verification-id
+                (merge request {
+                    completed: true,
+                    verified: verification-result,
+                })
+            )
+            (ok true)
+        )
+    )
+)
+
+(define-public (list-credential-for-verification
+        (credential-id uint)
+        (verification-price uint)
+    )
+    (let ((credential (unwrap! (map-get? credentials credential-id) err-credential-not-found)))
+        (begin
+            (asserts! (not (var-get contract-paused)) err-invalid-parameter)
+            (asserts! (is-eq tx-sender (get holder credential))
+                err-not-authorized
+            )
+            (asserts! (not (get revoked credential)) err-invalid-parameter)
+            (asserts! (> (get expiry-date credential) stacks-block-height)
+                err-expired-credential
+            )
+            (asserts! (> verification-price u0) err-invalid-parameter)
+            (map-set credential-listings {
+                credential-id: credential-id,
+                holder: tx-sender,
+            } {
+                verification-price: verification-price,
+                available: true,
+                listed-at: stacks-block-height,
+            })
+            (ok true)
+        )
+    )
+)
+
+(define-public (purchase-verification-access
+        (credential-id uint)
+        (holder principal)
+    )
+    (let (
+            (listing (unwrap!
+                (map-get? credential-listings {
+                    credential-id: credential-id,
+                    holder: holder,
+                })
+                err-not-authorized
+            ))
+            (credential (unwrap! (map-get? credentials credential-id)
+                err-credential-not-found
+            ))
+        )
+        (begin
+            (asserts! (get available listing) err-invalid-parameter)
+            (asserts!
+                (>= (stx-get-balance tx-sender) (get verification-price listing))
+                err-insufficient-funds
+            )
+            ;; Transfer payment to credential holder
+            (unwrap!
+                (stx-transfer? (get verification-price listing) tx-sender holder)
+                err-insufficient-funds
+            )
+            ;; Mark as purchased (could extend to track purchasers)
+            (ok true)
+        )
+    )
+)
+
+;; Analytics and reporting functions
+(define-public (update-issuer-analytics (issuer principal))
+    (let ((issuer-info (unwrap! (map-get? authorized-issuers issuer) err-not-authorized)))
+        (begin
+            (asserts! (get verified issuer-info) err-not-verified)
+            ;; Update analytics (simplified calculation)
+            (map-set issuer-analytics issuer {
+                monthly-credentials: (get credentials-issued issuer-info),
+                revocation-rate: u0, ;; Would be calculated based on revoked credentials
+                average-validity-period: u8640, ;; Simplified average
+                last-updated: stacks-block-height,
+            })
+            (ok true)
+        )
+    )
+)
+
+(define-public (batch-verify-credentials (credential-ids (list 10 uint)))
+    (begin
+        (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+        (ok (map verify-single-credential credential-ids))
+    )
+)
+
+(define-private (verify-single-credential (credential-id uint))
+    (match (map-get? credentials credential-id)
+        credential (map-set credentials credential-id (merge credential { verified: true }))
+        false
+    )
+)
+
+;; Read-only analytics functions
+(define-read-only (get-verification-request (verification-id uint))
+    (map-get? verification-requests verification-id)
+)
+
+(define-read-only (get-credential-listing
+        (credential-id uint)
+        (holder principal)
+    )
+    (map-get? credential-listings {
+        credential-id: credential-id,
+        holder: holder,
+    })
+)
+
+(define-read-only (get-issuer-analytics (issuer principal))
+    (map-get? issuer-analytics issuer)
+)
+
+(define-read-only (get-holder-skill-summary (holder principal))
+    (let ((profile (unwrap! (map-get? holder-profiles holder) (err u0))))
+        (ok {
+            total-credentials: (get total-credentials profile),
+            verified-credentials: (get verified-credentials profile),
+            skill-points: (get skill-points profile),
+            verification-rate: (if (> (get total-credentials profile) u0)
+                (/ (* (get verified-credentials profile) u100)
+                    (get total-credentials profile)
+                )
+                u0
+            ),
+        })
+    )
+)
+
+(define-read-only (calculate-credential-trust-score (credential-id uint))
+    (let ((credential (unwrap! (map-get? credentials credential-id) (err u0))))
+        (let (
+                (issuer-info (unwrap! (map-get? authorized-issuers (get issuer credential))
+                    (err u0)
+                ))
+                (is-valid (unwrap! (is-credential-valid credential-id) (err u0)))
+                (time-factor (if (> (get expiry-date credential) stacks-block-height)
+                    u100
+                    u0
+                ))
+            )
+            (ok (+ (* (get reputation-score issuer-info) u10)
+                ;; Issuer reputation weight
+                (if is-valid
+                    u300
+                    u0
+                )
+                ;; Valid credential bonus time-factor
+                ;; Time remaining factor
+                (* (get certification-level credential) u50) ;; Level factor
+            ))
+        )
+    )
+)
+
+;; Emergency and maintenance functions
+(define-public (emergency-revoke-credential (credential-id uint))
+    (let ((credential (unwrap! (map-get? credentials credential-id) err-credential-not-found)))
+        (begin
+            (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+            (map-set credentials credential-id
+                (merge credential { revoked: true })
+            )
+            (ok true)
+        )
+    )
+)
+
+(define-public (deactivate-skill-category (category (string-utf8 32)))
+    (let ((category-info (unwrap! (map-get? skill-categories category) err-invalid-parameter)))
+        (begin
+            (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+            (map-set skill-categories category
+                (merge category-info { active: false })
+            )
+            (ok true)
+        )
+    )
+)
