@@ -485,3 +485,209 @@ describe("SkillCert Contract Tests - Issuer Management & Credential Minting", ()
     });
   });
 });
+
+describe("SkillCert Contract Tests - Credential Lifecycle & Marketplace", () => {
+  beforeEach(() => {
+    simnet.mineEmptyBlocks(1);
+    simnet.callPublicFn(
+      "skillcert",
+      "add-skill-category",
+      [Cl.stringUtf8("programming"), Cl.stringUtf8("Software development skills")],
+      deployer
+    );
+    simnet.callPublicFn(
+      "skillcert",
+      "register-issuer",
+      [Cl.stringUtf8("Tech University"), Cl.uint(1)],
+      wallet1
+    );
+    simnet.callPublicFn("skillcert", "verify-issuer", [Cl.principal(wallet1)], deployer);
+    simnet.callPublicFn(
+      "skillcert",
+      "mint-credential",
+      [
+        Cl.principal(wallet2),
+        Cl.stringUtf8("JavaScript Development"),
+        Cl.stringUtf8("programming"),
+        Cl.uint(2),
+        Cl.uint(8640),
+        Cl.stringUtf8("https://example.com/metadata")
+      ],
+      wallet1
+    );
+  });
+
+  describe("Credential Validation", () => {
+    it("should validate active credential correctly", () => {
+      const isValid = simnet.callReadOnlyFn("skillcert", "is-credential-valid", [Cl.uint(1)], deployer);
+      expect(isValid.result).toBeOk(Cl.bool(true));
+    });
+
+    it("should invalidate revoked credential", () => {
+      simnet.callPublicFn("skillcert", "revoke-credential", [Cl.uint(1)], wallet1);
+      
+      const isValid = simnet.callReadOnlyFn("skillcert", "is-credential-valid", [Cl.uint(1)], deployer);
+      expect(isValid.result).toBeOk(Cl.bool(false));
+    });
+  });
+
+  describe("Credential Management", () => {
+    it("should allow issuer to revoke credential", () => {
+      const revokeCredential = simnet.callPublicFn("skillcert", "revoke-credential", [Cl.uint(1)], wallet1);
+      expect(revokeCredential.result).toBeOk(Cl.bool(true));
+
+      const credential = simnet.callReadOnlyFn("skillcert", "get-credential-details", [Cl.uint(1)], deployer);
+      expect(credential.result).toBeSome(
+        Cl.tuple({
+          holder: Cl.principal(wallet2),
+          issuer: Cl.principal(wallet1),
+          "skill-name": Cl.stringUtf8("JavaScript Development"),
+          "skill-category": Cl.stringUtf8("programming"),
+          "certification-level": Cl.uint(2),
+          "issue-date": Cl.uint(simnet.blockHeight - 1),
+          "expiry-date": Cl.uint(simnet.blockHeight - 1 + 8640),
+          verified: Cl.bool(true),
+          "metadata-uri": Cl.stringUtf8("https://example.com/metadata"),
+          revoked: Cl.bool(true)
+        })
+      );
+    });
+
+    it("should reject revocation from non-issuer", () => {
+      const revokeCredential = simnet.callPublicFn("skillcert", "revoke-credential", [Cl.uint(1)], wallet2);
+      expect(revokeCredential.result).toBeErr(Cl.uint(101));
+    });
+
+    it("should allow issuer to renew credential", () => {
+      const renewCredential = simnet.callPublicFn(
+        "skillcert",
+        "renew-credential",
+        [Cl.uint(1), Cl.uint(17280)],
+        wallet1
+      );
+      expect(renewCredential.result).toBeOk(Cl.bool(true));
+    });
+
+    it("should allow holder to transfer credential", () => {
+      const transferCredential = simnet.callPublicFn(
+        "skillcert",
+        "transfer-credential",
+        [Cl.uint(1), Cl.principal(wallet3)],
+        wallet2
+      );
+      expect(transferCredential.result).toBeOk(Cl.bool(true));
+
+      const credential = simnet.callReadOnlyFn("skillcert", "get-credential-details", [Cl.uint(1)], deployer);
+      expect(credential.result).toBeSome(
+        Cl.tuple({
+          holder: Cl.principal(wallet3),
+          issuer: Cl.principal(wallet1),
+          "skill-name": Cl.stringUtf8("JavaScript Development"),
+          "skill-category": Cl.stringUtf8("programming"),
+          "certification-level": Cl.uint(2),
+          "issue-date": Cl.uint(simnet.blockHeight - 1),
+          "expiry-date": Cl.uint(simnet.blockHeight - 1 + 8640),
+          verified: Cl.bool(true),
+          "metadata-uri": Cl.stringUtf8("https://example.com/metadata"),
+          revoked: Cl.bool(false)
+        })
+      );
+    });
+
+    it("should reject transfer from non-holder", () => {
+      const transferCredential = simnet.callPublicFn(
+        "skillcert",
+        "transfer-credential",
+        [Cl.uint(1), Cl.principal(wallet3)],
+        wallet1
+      );
+      expect(transferCredential.result).toBeErr(Cl.uint(101));
+    });
+  });
+
+  describe("Marketplace Functions", () => {
+    it("should allow listing credential for verification", () => {
+      const listCredential = simnet.callPublicFn(
+        "skillcert",
+        "list-credential-for-verification",
+        [Cl.uint(1), Cl.uint(100000)],
+        wallet2
+      );
+      expect(listCredential.result).toBeOk(Cl.bool(true));
+
+      const listing = simnet.callReadOnlyFn(
+        "skillcert",
+        "get-credential-listing",
+        [Cl.uint(1), Cl.principal(wallet2)],
+        deployer
+      );
+      expect(listing.result).toBeSome(Cl.tuple({
+        "verification-price": Cl.uint(100000),
+        available: Cl.bool(true),
+        "listed-at": Cl.uint(simnet.blockHeight)
+      }));
+    });
+
+    it("should handle verification requests", () => {
+      const requestVerification = simnet.callPublicFn(
+        "skillcert",
+        "request-credential-verification",
+        [Cl.principal(wallet2), Cl.uint(1), Cl.uint(200000)],
+        wallet3
+      );
+      expect(requestVerification.result).toBeOk(Cl.uint(1));
+
+      const completeVerification = simnet.callPublicFn(
+        "skillcert",
+        "complete-verification-request",
+        [Cl.uint(1), Cl.bool(true)],
+        wallet2
+      );
+      expect(completeVerification.result).toBeOk(Cl.bool(true));
+    });
+
+    it("should allow purchasing verification access", () => {
+      simnet.callPublicFn(
+        "skillcert",
+        "list-credential-for-verification",
+        [Cl.uint(1), Cl.uint(100000)],
+        wallet2
+      );
+
+      const purchaseAccess = simnet.callPublicFn(
+        "skillcert",
+        "purchase-verification-access",
+        [Cl.uint(1), Cl.principal(wallet2)],
+        wallet3
+      );
+      expect(purchaseAccess.result).toBeOk(Cl.bool(true));
+    });
+  });
+
+  describe("Analytics & Emergency Functions", () => {
+    it("should get holder skill summary", () => {
+      const skillSummary = simnet.callReadOnlyFn("skillcert", "get-holder-skill-summary", [Cl.principal(wallet2)], deployer);
+      expect(skillSummary.result).toBeOk(Cl.tuple({
+        "total-credentials": Cl.uint(1),
+        "verified-credentials": Cl.uint(1),
+        "skill-points": Cl.uint(25),
+        "verification-rate": Cl.uint(100)
+      }));
+    });
+
+    it("should calculate credential trust score", () => {
+      const trustScore = simnet.callReadOnlyFn("skillcert", "calculate-credential-trust-score", [Cl.uint(1)], deployer);
+      expect(trustScore.result).toBeOk(Cl.uint(410));
+    });
+
+    it("should allow owner to emergency revoke credential", () => {
+      const emergencyRevoke = simnet.callPublicFn("skillcert", "emergency-revoke-credential", [Cl.uint(1)], deployer);
+      expect(emergencyRevoke.result).toBeOk(Cl.bool(true));
+    });
+
+    it("should allow owner to withdraw platform fees", () => {
+      const withdrawFees = simnet.callPublicFn("skillcert", "withdraw-platform-fees", [], deployer);
+      expect(withdrawFees.result).toBeOk(Cl.uint(500000));
+    });
+  });
+});
