@@ -155,3 +155,333 @@ describe("SkillCert Contract Tests - Basic Setup & Read Functions", () => {
     });
   });
 });
+
+describe("SkillCert Contract Tests - Issuer Management & Credential Minting", () => {
+  beforeEach(() => {
+    simnet.mineEmptyBlocks(1);
+    simnet.callPublicFn(
+      "skillcert",
+      "add-skill-category",
+      [Cl.stringUtf8("programming"), Cl.stringUtf8("Software development skills")],
+      deployer
+    );
+  });
+
+  describe("Issuer Registration", () => {
+    it("should allow issuer registration with valid parameters", () => {
+      const registerIssuer = simnet.callPublicFn(
+        "skillcert",
+        "register-issuer",
+        [Cl.stringUtf8("Tech University"), Cl.uint(1)],
+        wallet1
+      );
+      expect(registerIssuer.result).toBeOk(Cl.bool(true));
+
+      const issuer = simnet.callReadOnlyFn("skillcert", "get-issuer-info", [Cl.principal(wallet1)], deployer);
+      expect(issuer.result).toBeSome(Cl.tuple({
+        name: Cl.stringUtf8("Tech University"),
+        "issuer-type": Cl.uint(1),
+        verified: Cl.bool(false),
+        "credentials-issued": Cl.uint(0),
+        "reputation-score": Cl.uint(0)
+      }));
+    });
+
+    it("should reject invalid issuer type", () => {
+      const registerIssuer = simnet.callPublicFn(
+        "skillcert",
+        "register-issuer",
+        [Cl.stringUtf8("Invalid Issuer"), Cl.uint(5)],
+        wallet1
+      );
+      expect(registerIssuer.result).toBeErr(Cl.uint(103));
+    });
+
+    it("should reject duplicate issuer registration", () => {
+      simnet.callPublicFn(
+        "skillcert",
+        "register-issuer",
+        [Cl.stringUtf8("Tech University"), Cl.uint(1)],
+        wallet1
+      );
+
+      const registerDuplicate = simnet.callPublicFn(
+        "skillcert",
+        "register-issuer",
+        [Cl.stringUtf8("Another University"), Cl.uint(2)],
+        wallet1
+      );
+      expect(registerDuplicate.result).toBeErr(Cl.uint(103));
+    });
+
+    it("should reject registration when contract is paused", () => {
+      simnet.callPublicFn("skillcert", "toggle-contract-pause", [], deployer);
+
+      const registerIssuer = simnet.callPublicFn(
+        "skillcert",
+        "register-issuer",
+        [Cl.stringUtf8("Paused University"), Cl.uint(1)],
+        wallet1
+      );
+      expect(registerIssuer.result).toBeErr(Cl.uint(103));
+    });
+  });
+
+  describe("Issuer Verification", () => {
+    beforeEach(() => {
+      simnet.callPublicFn(
+        "skillcert",
+        "register-issuer",
+        [Cl.stringUtf8("Tech University"), Cl.uint(1)],
+        wallet1
+      );
+    });
+
+    it("should allow owner to verify issuer", () => {
+      const verifyIssuer = simnet.callPublicFn(
+        "skillcert",
+        "verify-issuer",
+        [Cl.principal(wallet1)],
+        deployer
+      );
+      expect(verifyIssuer.result).toBeOk(Cl.bool(true));
+
+      const issuer = simnet.callReadOnlyFn("skillcert", "get-issuer-info", [Cl.principal(wallet1)], deployer);
+      expect(issuer.result).toBeSome(Cl.tuple({
+        name: Cl.stringUtf8("Tech University"),
+        "issuer-type": Cl.uint(1),
+        verified: Cl.bool(true),
+        "credentials-issued": Cl.uint(0),
+        "reputation-score": Cl.uint(0)
+      }));
+    });
+
+    it("should reject verification from non-owner", () => {
+      const verifyIssuer = simnet.callPublicFn(
+        "skillcert",
+        "verify-issuer",
+        [Cl.principal(wallet1)],
+        wallet2
+      );
+      expect(verifyIssuer.result).toBeErr(Cl.uint(100));
+    });
+
+    it("should reject verification of non-existent issuer", () => {
+      const verifyIssuer = simnet.callPublicFn(
+        "skillcert",
+        "verify-issuer",
+        [Cl.principal(wallet3)],
+        deployer
+      );
+      expect(verifyIssuer.result).toBeErr(Cl.uint(101));
+    });
+
+    it("should reject double verification", () => {
+      simnet.callPublicFn("skillcert", "verify-issuer", [Cl.principal(wallet1)], deployer);
+
+      const verifyAgain = simnet.callPublicFn(
+        "skillcert",
+        "verify-issuer",
+        [Cl.principal(wallet1)],
+        deployer
+      );
+      expect(verifyAgain.result).toBeErr(Cl.uint(104));
+    });
+  });
+
+  describe("Credential Minting", () => {
+    beforeEach(() => {
+      simnet.callPublicFn(
+        "skillcert",
+        "register-issuer",
+        [Cl.stringUtf8("Tech University"), Cl.uint(1)],
+        wallet1
+      );
+      simnet.callPublicFn("skillcert", "verify-issuer", [Cl.principal(wallet1)], deployer);
+    });
+
+    it("should mint credential successfully", () => {
+      const mintCredential = simnet.callPublicFn(
+        "skillcert",
+        "mint-credential",
+        [
+          Cl.principal(wallet2),
+          Cl.stringUtf8("JavaScript Development"),
+          Cl.stringUtf8("programming"),
+          Cl.uint(2),
+          Cl.uint(8640),
+          Cl.stringUtf8("https://example.com/metadata")
+        ],
+        wallet1
+      );
+      expect(mintCredential.result).toBeOk(Cl.uint(1));
+
+      const credential = simnet.callReadOnlyFn("skillcert", "get-credential-details", [Cl.uint(1)], deployer);
+      expect(credential.result).toBeSome(Cl.tuple({
+        holder: Cl.principal(wallet2),
+        issuer: Cl.principal(wallet1),
+        "skill-name": Cl.stringUtf8("JavaScript Development"),
+        "skill-category": Cl.stringUtf8("programming"),
+        "certification-level": Cl.uint(2),
+        "issue-date": Cl.uint(simnet.blockHeight),
+        "expiry-date": Cl.uint(simnet.blockHeight + 8640),
+        verified: Cl.bool(true),
+        "metadata-uri": Cl.stringUtf8("https://example.com/metadata"),
+        revoked: Cl.bool(false)
+      }));
+
+      const holderProfile = simnet.callReadOnlyFn("skillcert", "get-holder-profile", [Cl.principal(wallet2)], deployer);
+      expect(holderProfile.result).toBeSome(Cl.tuple({
+        "total-credentials": Cl.uint(1),
+        "verified-credentials": Cl.uint(1),
+        "skill-points": Cl.uint(25),
+        "profile-active": Cl.bool(true)
+      }));
+    });
+
+    it("should reject minting from unverified issuer", () => {
+      simnet.callPublicFn(
+        "skillcert",
+        "register-issuer",
+        [Cl.stringUtf8("Unverified University"), Cl.uint(1)],
+        wallet3
+      );
+
+      const mintCredential = simnet.callPublicFn(
+        "skillcert",
+        "mint-credential",
+        [
+          Cl.principal(wallet2),
+          Cl.stringUtf8("Python Development"),
+          Cl.stringUtf8("programming"),
+          Cl.uint(1),
+          Cl.uint(8640),
+          Cl.stringUtf8("https://example.com/metadata")
+        ],
+        wallet3
+      );
+      expect(mintCredential.result).toBeErr(Cl.uint(105));
+    });
+
+    it("should reject minting with invalid certification level", () => {
+      const mintCredential = simnet.callPublicFn(
+        "skillcert",
+        "mint-credential",
+        [
+          Cl.principal(wallet2),
+          Cl.stringUtf8("Invalid Level"),
+          Cl.stringUtf8("programming"),
+          Cl.uint(5),
+          Cl.uint(8640),
+          Cl.stringUtf8("https://example.com/metadata")
+        ],
+        wallet1
+      );
+      expect(mintCredential.result).toBeErr(Cl.uint(103));
+    });
+
+    it("should reject minting with invalid category", () => {
+      const mintCredential = simnet.callPublicFn(
+        "skillcert",
+        "mint-credential",
+        [
+          Cl.principal(wallet2),
+          Cl.stringUtf8("Unknown Skill"),
+          Cl.stringUtf8("unknown-category"),
+          Cl.uint(1),
+          Cl.uint(8640),
+          Cl.stringUtf8("https://example.com/metadata")
+        ],
+        wallet1
+      );
+      expect(mintCredential.result).toBeErr(Cl.uint(103));
+    });
+
+    it("should update issuer statistics after minting", () => {
+      simnet.callPublicFn(
+        "skillcert",
+        "mint-credential",
+        [
+          Cl.principal(wallet2),
+          Cl.stringUtf8("React Development"),
+          Cl.stringUtf8("programming"),
+          Cl.uint(3),
+          Cl.uint(8640),
+          Cl.stringUtf8("https://example.com/metadata")
+        ],
+        wallet1
+      );
+
+      const issuer = simnet.callReadOnlyFn("skillcert", "get-issuer-info", [Cl.principal(wallet1)], deployer);
+      expect(issuer.result).toBeSome(Cl.tuple({
+        name: Cl.stringUtf8("Tech University"),
+        "issuer-type": Cl.uint(1),
+        verified: Cl.bool(true),
+        "credentials-issued": Cl.uint(1),
+        "reputation-score": Cl.uint(1)
+      }));
+    });
+
+    it("should update skill category statistics after minting", () => {
+      simnet.callPublicFn(
+        "skillcert",
+        "mint-credential",
+        [
+          Cl.principal(wallet2),
+          Cl.stringUtf8("Node.js Development"),
+          Cl.stringUtf8("programming"),
+          Cl.uint(2),
+          Cl.uint(8640),
+          Cl.stringUtf8("https://example.com/metadata")
+        ],
+        wallet1
+      );
+
+      const category = simnet.callReadOnlyFn(
+        "skillcert",
+        "get-skill-category",
+        [Cl.stringUtf8("programming")],
+        deployer
+      );
+      expect(category.result).toBeSome(Cl.tuple({
+        active: Cl.bool(true),
+        "total-credentials": Cl.uint(1),
+        "category-description": Cl.stringUtf8("Software development skills")
+      }));
+    });
+
+    it("should calculate correct skill points for different levels", () => {
+      const levels = [
+        { level: 1, points: 10 },
+        { level: 2, points: 25 },
+        { level: 3, points: 50 },
+        { level: 4, points: 100 }
+      ];
+
+      levels.forEach(({ level, points }, index) => {
+        const holder = index === 0 ? wallet2 : wallet3;
+        simnet.callPublicFn(
+          "skillcert",
+          "mint-credential",
+          [
+            Cl.principal(holder),
+            Cl.stringUtf8(`Skill Level ${level}`),
+            Cl.stringUtf8("programming"),
+            Cl.uint(level),
+            Cl.uint(8640),
+            Cl.stringUtf8("https://example.com/metadata")
+          ],
+          wallet1
+        );
+
+        const profile = simnet.callReadOnlyFn("skillcert", "get-holder-profile", [Cl.principal(holder)], deployer);
+        expect(profile.result).toBeSome(Cl.tuple({
+          "total-credentials": Cl.uint(1),
+          "verified-credentials": Cl.uint(1),
+          "skill-points": Cl.uint(points),
+          "profile-active": Cl.bool(true)
+        }));
+      });
+    });
+  });
+});
